@@ -1,30 +1,37 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-import 'package:translify/main.dart';
+import 'package:translify/services/api_failure.dart';
+import 'package:translify/views/Text_Translation_Views/text_translation_view.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('text translation displays a result', (tester) async {
+    await tester.pumpWidget(MaterialApp(home: TextTranslationView(
+      translate: (text, source, target) async => '$text translated',
+    )));
+    await tester.enterText(find.byKey(const Key('translation-input')), 'Hello');
+    await tester.tap(find.text('Translate'));
+    await tester.pumpAndSettle();
+    expect(find.text('Hello translated'), findsOneWidget);
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
+  testWidgets('empty text requests are rejected without a network call', (tester) async {
+    var calls = 0;
+    await tester.pumpWidget(MaterialApp(home: TextTranslationView(
+      translate: (text, source, target) async { calls++; return 'hi'; },
+    )));
+    await tester.tap(find.text('Translate'));
     await tester.pump();
+    expect(find.text('Enter text to translate.'), findsOneWidget);
+    expect(calls, 0);
+  });
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  testWidgets('network failures show a useful message', (tester) async {
+    await tester.pumpWidget(MaterialApp(home: TextTranslationView(
+      translate: (text, source, target) async => throw const ApiFailure('Network is unavailable.'),
+    )));
+    await tester.enterText(find.byKey(const Key('translation-input')), 'Hello');
+    await tester.tap(find.text('Translate'));
+    await tester.pumpAndSettle();
+    expect(find.text('Network is unavailable.'), findsOneWidget);
   });
 }

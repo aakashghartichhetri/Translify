@@ -1,75 +1,56 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi import HTTPException
-import cv2
-import uvicorn
-import numpy as np
+"""TrOCR service with bounded uploads and no retained images or recognized-text logs."""
+import asyncio
+from functools import lru_cache
+from io import BytesIO
+import logging
 import os
-from PIL import Image
-import torch
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 
+import cv2
+import numpy as np
+from PIL import Image, UnidentifiedImageError
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 import config
 
-CAPTURE_PATH = "captured_frame.jpg"
-
-# Load once at startup
-print(f"[init] Loading TrOCR model: {config.MODEL_ID}")
-device    = "cuda" if torch.cuda.is_available() else "cpu"
-processor = TrOCRProcessor.from_pretrained(config.MODEL_ID)
-model     = VisionEncoderDecoderModel.from_pretrained(config.MODEL_ID).to(device)
-model.eval()
-print(f"[init] Model loaded on {device}")
-
+logger = logging.getLogger("translify.ocr")
 app = FastAPI()
+ocr_semaphore = asyncio.Semaphore(1)
+MAX_UPLOAD = 5 * 1024 * 1024
+Image.MAX_IMAGE_PIXELS = 20_000_000
 
 
-def select_best_channel(bgr: np.ndarray) -> np.ndarray:
-    """Pick the B/G/R channel (or its inverse) with the cleanest Otsu split,
-    then make sure background is the bright side."""
-    best_gray  = None
+@lru_cache(maxsize=1)
+def get_model():
+    # Lazy initialization permits health checks and unit tests without downloading models.
+    import torch
+    from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    processor = TrOCRProcessor.from_pretrained(config.MODEL_ID)
+    model = VisionEncoderDecoderModel.from_pretrained(config.MODEL_ID).to(device)
+    model.eval()
+    return processor, model, device, torch
+
+
+def select_best_channel(bgr):
+    best = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     best_score = -1
-
-    for ch in cv2.split(bgr):
-        for img in [ch, cv2.bitwise_not(ch)]:
-            _, binary = cv2.threshold(
-                img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-            )
-            fg = img[binary == 255]
-            bg = img[binary == 0]
-
+    for channel in cv2.split(bgr):
+        for candidate in (channel, cv2.bitwise_not(channel)):
+            _, binary = cv2.threshold(candidate, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            fg, bg = candidate[binary == 255], candidate[binary == 0]
             if len(fg) == 0 or len(bg) == 0:
                 continue
-
             score = abs(float(np.mean(fg)) - float(np.mean(bg)))
-            print(f"[channel] score={score:.1f}")
-
             if score > best_score:
-                best_score = score
-                best_gray  = img.copy()
-
-    print(f"[channel] best contrast score: {best_score:.1f}")
-
-    # Background should be the bright side; downstream BINARY_INV depends on it
-    _, otsu = cv2.threshold(best_gray, 0, 255,
-                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bright_fraction = (otsu == 255).sum() / otsu.size
-    if bright_fraction < 0.5:
-        print(f"[channel] inverting polarity (bright fraction {bright_fraction:.2f})")
-        best_gray = cv2.bitwise_not(best_gray)
-
-    return best_gray
+                best, best_score = candidate.copy(), score
+    _, binary = cv2.threshold(best, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return cv2.bitwise_not(best) if (binary == 255).mean() < 0.5 else best
 
 
-def preprocess_for_ocr(gray: np.ndarray, bgr: np.ndarray = None) -> np.ndarray:
-    """Best-channel swap (if bgr given) -> gamma -> optional invert -> denoise."""
-    polarity_already_normalized = bgr is not None
+def preprocess_for_ocr(gray, bgr=None):
     if bgr is not None:
         gray = select_best_channel(bgr)
-
     avg = np.mean(gray)
-    print(f"[preprocess] avg brightness: {avg:.1f}")
-
     if avg < config.GAMMA_VERY_DARK:
         gamma = 0.5
     elif avg < config.GAMMA_DARK:
@@ -78,241 +59,141 @@ def preprocess_for_ocr(gray: np.ndarray, bgr: np.ndarray = None) -> np.ndarray:
         gamma = 1.5
     else:
         gamma = 1.0
-
     if gamma != 1.0:
-        print(f"[preprocess] applying gamma: {gamma}")
-        table = np.array([
-            ((i / 255.0) ** gamma) * 255 for i in range(256)
-        ], dtype=np.uint8)
-        gray = cv2.LUT(gray, table)
-
-    # Skip when bgr was given; select_best_channel already handled polarity
-    if not polarity_already_normalized:
-        if np.mean(gray) < config.INVERT_THRESHOLD:
-            print("[preprocess] inverting (light text on dark background)")
-            gray = cv2.bitwise_not(gray)
-
-    gray = cv2.fastNlMeansDenoising(gray, h=config.DENOISE_H)
-    return gray
+        lookup = np.array([((i / 255.0) ** gamma) * 255 for i in range(256)], dtype=np.uint8)
+        gray = cv2.LUT(gray, lookup)
+    if bgr is None and np.mean(gray) < config.INVERT_THRESHOLD:
+        gray = cv2.bitwise_not(gray)
+    return cv2.fastNlMeansDenoising(gray, h=config.DENOISE_H)
 
 
-def detect_text_regions(gray: np.ndarray):
-    """Adaptive threshold + horizontal dilate -> contours -> filter."""
+def detect_text_regions(gray):
     binary = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        blockSize=config.ADAPTIVE_BLOCK_SIZE,
-        C=config.ADAPTIVE_C
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
+        config.ADAPTIVE_BLOCK_SIZE, config.ADAPTIVE_C,
     )
-
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (config.H_KERNEL_WIDTH, 1))
-    dilated  = cv2.dilate(binary, h_kernel, iterations=1)
-
-    # RETR_LIST so an outer contour can't hide nested text
-    contours, _ = cv2.findContours(dilated, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (config.H_KERNEL_WIDTH, 1))
+    contours, _ = cv2.findContours(cv2.dilate(binary, kernel, iterations=1), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    height, width = gray.shape
     regions = []
-    img_h, img_w = gray.shape
-    max_h = img_h * config.MAX_LINE_HEIGHT_RATIO
-
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
         if w < config.MIN_REGION_W or h < config.MIN_REGION_H:
-            continue  # noise
-
-        if h > max_h:
-            print(f"[detect] dropping oversized blob {w}x{h}")
             continue
-
-        if w > img_w * 0.95 and h > img_h * 0.95:
-            print(f"[detect] dropping page-spanning blob {w}x{h}")
+        if h > height * config.MAX_LINE_HEIGHT_RATIO or (w > width * .95 and h > height * .95):
             continue
-
         regions.append((x, y, w, h))
-
-    regions.sort(key=lambda r: (r[1], r[0]))
-    return regions
+    regions.sort(key=lambda box: (box[1], box[0]))
+    return regions[:200]
 
 
 def merge_regions_into_lines(regions):
-    """Merge boxes onto the same line by vertical overlap."""
-    if not regions:
-        return []
-
-    def vertical_overlap_ratio(a, b):
-        a_y, a_y2 = a[1], a[1] + a[3]
-        b_y, b_y2 = b[1], b[1] + b[3]
-        overlap = max(0, min(a_y2, b_y2) - max(a_y, b_y))
-        min_h   = min(a[3], b[3])
-        return overlap / min_h if min_h > 0 else 0.0
-
-    lines = []
-    used  = [False] * len(regions)
-
-    for i, r in enumerate(regions):
+    lines, used = [], [False] * len(regions)
+    for i, region in enumerate(regions):
         if used[i]:
             continue
-        group = [r]
+        group = [region]
         used[i] = True
         for j in range(i + 1, len(regions)):
             if used[j]:
                 continue
-            if any(vertical_overlap_ratio(g, regions[j]) >= config.VERTICAL_OVERLAP_THRESH
-                   for g in group):
-                group.append(regions[j])
+            candidate = regions[j]
+            if any(
+                max(0, min(g[1] + g[3], candidate[1] + candidate[3]) - max(g[1], candidate[1])) /
+                max(1, min(g[3], candidate[3])) >= config.VERTICAL_OVERLAP_THRESH
+                for g in group
+            ):
+                group.append(candidate)
                 used[j] = True
-        lines.append(group)
-
-    merged = []
-    for group in lines:
-        x1 = min(r[0] for r in group)
-        y1 = min(r[1] for r in group)
-        x2 = max(r[0] + r[2] for r in group)
-        y2 = max(r[1] + r[3] for r in group)
-        merged.append((x1, y1, x2 - x1, y2 - y1))
-
-    merged.sort(key=lambda r: (r[1], r[0]))
-    return merged
+        x = min(g[0] for g in group)
+        y = min(g[1] for g in group)
+        right = max(g[0] + g[2] for g in group)
+        bottom = max(g[1] + g[3] for g in group)
+        lines.append((x, y, right - x, bottom - y))
+    return sorted(lines, key=lambda box: (box[1], box[0]))[:40]
 
 
-def recognize_crop(crop_bgr: np.ndarray) -> str:
-    """Run TrOCR on one crop. Skips tiny or low-confidence results."""
-    h, w = crop_bgr.shape[:2]
-    if w < config.MIN_CROP_PX or h < config.MIN_CROP_PX:
-        print(f"[recognize] skipping crop {w}x{h} (too small)")
+def recognize_crop(crop):
+    if min(crop.shape[:2]) < config.MIN_CROP_PX:
         return ""
-
-    pil_img = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
-    pixel_values = processor(images=pil_img, return_tensors="pt").pixel_values.to(device)
-
+    processor, model, device, torch = get_model()
+    image = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+    pixels = processor(images=image, return_tensors="pt").pixel_values.to(device)
     with torch.no_grad():
-        outputs = model.generate(
-            pixel_values,
-            num_beams=config.NUM_BEAMS,
-            max_new_tokens=config.MAX_NEW_TOKENS,
-            output_scores=True,
-            return_dict_in_generate=True,
+        result = model.generate(
+            pixels, num_beams=config.NUM_BEAMS, max_new_tokens=config.MAX_NEW_TOKENS,
+            output_scores=True, return_dict_in_generate=True,
         )
-
-    confidence = outputs.sequences_scores[0].item()
-    text = processor.batch_decode(outputs.sequences, skip_special_tokens=True)[0].strip()
-
-    print(f"[recognize] '{text}'  confidence={confidence:.3f}")
-
-    if confidence < config.MIN_CONFIDENCE:
-        print(f"[recognize] rejected (confidence {confidence:.3f} < {config.MIN_CONFIDENCE})")
+    if result.sequences_scores[0].item() < config.MIN_CONFIDENCE:
         return ""
+    return processor.batch_decode(result.sequences, skip_special_tokens=True)[0].strip()
 
-    return text
 
-
-def run_ocr(jpeg_bytes: bytes):
-    """End-to-end pipeline. Returns (text, contents) and saves an annotated frame."""
-    np_arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-    frame  = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-    # Upscale small inputs; TrOCR reads them better at higher res
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    orig_h, orig_w = gray.shape
-    if orig_w < config.UPSCALE_MIN_WIDTH:
-        scale         = config.UPSCALE_MIN_WIDTH / orig_w
-        gray_upscaled = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        frame_scaled  = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    else:
-        scale         = 1.0
-        gray_upscaled = gray
-        frame_scaled  = frame
-
-    gray_upscaled = preprocess_for_ocr(gray_upscaled, bgr=frame_scaled)
-
-    regions_scaled = detect_text_regions(gray_upscaled)
-    regions_scaled = merge_regions_into_lines(regions_scaled)
-    print(f"[ocr] {len(regions_scaled)} line(s) after merging")
-
-    all_lines = []
-    contents  = []
-
-    for (sx, sy, sw, sh) in regions_scaled:
-        crop = frame_scaled[sy:sy + sh, sx:sx + sw]
-        if crop.size == 0:
+def run_ocr(image_bytes):
+    frame = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("Invalid image")
+    height, width = frame.shape[:2]
+    scale = config.UPSCALE_MIN_WIDTH / width if width < config.UPSCALE_MIN_WIDTH else 1.0
+    scaled = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC) if scale > 1 else frame
+    gray = preprocess_for_ocr(cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY), bgr=scaled)
+    regions = merge_regions_into_lines(detect_text_regions(gray))
+    contents = []
+    for sx, sy, sw, sh in regions:
+        crop = scaled[sy:sy + sh, sx:sx + sw]
+        if not crop.size:
             continue
-
-        line_text = recognize_crop(crop)
-        if not line_text:
+        line = recognize_crop(crop)
+        if not line:
             continue
+        ox, oy, ow, oh = [int(v / scale) for v in (sx, sy, sw, sh)]
+        bx, by = max(ox - 4, 0), max(oy - 4, 0)
+        bx2, by2 = min(ox + ow + 4, width), min(oy + oh + 4, height)
+        contents.append({"text": line, "bbox": {"x": bx, "y": by, "w": bx2 - bx, "h": by2 - by}})
+    return "\n".join(item["text"] for item in contents), contents
 
-        # Map back to original coords
-        ox = int(sx / scale)
-        oy = int(sy / scale)
-        ow = int(sw / scale)
-        oh = int(sh / scale)
 
-        # Small padding around the box
-        bx  = max(ox - 4, 0)
-        by  = max(oy - 4, 0)
-        bx2 = min(ox + ow + 4, frame.shape[1])
-        by2 = min(oy + oh + 4, frame.shape[0])
+async def read_limited(file):
+    data = bytearray()
+    while True:
+        chunk = await file.read(min(65536, MAX_UPLOAD + 1 - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > MAX_UPLOAD:
+            raise HTTPException(status_code=413, detail="Image too large")
+    if not data:
+        raise HTTPException(status_code=400, detail="Image is empty")
+    return bytes(data)
 
-        all_lines.append(line_text)
-        contents.append({
-            "text": line_text,
-            "bbox": {"x": bx, "y": by, "w": bx2 - bx, "h": by2 - by},
-        })
 
-        cv2.rectangle(frame, (bx, by), (bx2, by2), (0, 255, 0), 2)
-        cv2.putText(frame, line_text, (bx, max(by - 6, 12)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-
-    text = "\n".join(all_lines)
-
-    cv2.imwrite(CAPTURE_PATH, frame)
-    print(f"[snapshot] annotated frame saved -> {os.path.abspath(CAPTURE_PATH)}")
-
-    print("\n" + "=" * 50)
-    print("[OCR] Detected text:")
-    print("-" * 50)
-    print(text.strip() if text.strip() else "(no text detected)")
-    print("=" * 50 + "\n")
-
-    print("[CONTENTS] Detected blocks:")
-    print("-" * 50)
-    for i, entry in enumerate(contents):
-        bbox = entry["bbox"]
-        print(f"  Block {i + 1}:")
-        print(f"    Text : {entry['text']}")
-        print(f"    BBox : x={bbox['x']}, y={bbox['y']}, w={bbox['w']}, h={bbox['h']}")
-    print("=" * 50 + "\n")
-
-    return text, contents
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 
 @app.post("/capture")
 async def capture(image: UploadFile = File(...)):
-    """OCR a JPEG. Annotated image available at GET /captured_image."""
-    jpeg_bytes = await image.read()
-    if not jpeg_bytes:
-        raise HTTPException(status_code=400, detail="No image received")
-
     try:
-        text, contents = run_ocr(jpeg_bytes)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    return JSONResponse({
-        "text":     text,
-        "contents": contents,
-    })
-
-
-@app.get("/captured_image")
-def captured_image():
-    """Last annotated snapshot."""
-    if not os.path.exists(CAPTURE_PATH):
-        raise HTTPException(status_code=404, detail="No captured image yet")
-    return FileResponse(CAPTURE_PATH, media_type="image/jpeg")
+        data = await read_limited(image)
+        try:
+            with Image.open(BytesIO(data)) as picture:
+                if picture.format not in {"JPEG", "PNG"} or picture.width * picture.height > 20_000_000:
+                    raise ValueError("Invalid image")
+                picture.verify()
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+            raise HTTPException(status_code=400, detail="Upload a valid JPEG or PNG image") from None
+        async with ocr_semaphore:
+            try:
+                text, contents = await run_in_threadpool(run_ocr, data)
+            except Exception as exc:
+                logger.error("ocr_processing_failed type=%s", type(exc).__name__)
+                raise HTTPException(status_code=503, detail="OCR temporarily unavailable") from None
+        return {"text": text, "contents": contents}
+    finally:
+        await image.close()
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))

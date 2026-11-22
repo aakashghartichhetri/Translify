@@ -8,89 +8,45 @@ import 'package:translify/widgets/feature_button.dart';
 class HomeView extends StatelessWidget {
   const HomeView({super.key});
 
-  void settingsButtonTapped(BuildContext context) {
-    context.push(AppRoutes.settings);
-  }
-
-  void cameraTranslationButtonTapped(BuildContext context) async {
-    // Check the permission status of the camera
-    PermissionStatus status = await Permission.camera.status;
-
-    BuildContext contextCheck = context;
-    if (!contextCheck.mounted) {
-      return;
-    }
-
-    if (status.isGranted) {
-      // Nav to camera translation page
-      context.push(AppRoutes.initialCamera);
-    } else {
-      context.push(AppRoutes.cameraPermission);
-    }
-  }
-
-  void conversationTranslationButtonTapped(BuildContext context) {
-    // Nav to conversation translation page
-    context.push(AppRoutes.conversation);
+  Future<void> _camera(BuildContext context) async {
+    final permission = await Permission.camera.status;
+    if (!context.mounted) return;
+    context.push(permission.isGranted ? AppRoutes.initialCamera : AppRoutes.cameraPermission);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: TranslifyColors.backgroundColor,
-
-      body: Column(
-        children: [
-          SizedBox(height: MediaQuery.of(context).size.height * .1),
-
-          // The settings icon button
-          Align(
-            alignment: AlignmentGeometry.centerLeft,
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(
-                MediaQuery.of(context).size.width * .01,
-                0,
-                0,
-                0,
-              ),
-              child: IconButton(
-                onPressed: () => {settingsButtonTapped(context)},
-                icon: Icon(
-                  Icons.settings,
-                  color: TranslifyColors.adminButtonColor,
-                ),
-                iconSize: 50,
-                splashColor: TranslifyColors.adminButtonColor,
-              ),
-            ),
+      appBar: AppBar(
+        title: const Text('Translify'),
+        actions: [IconButton(tooltip: 'Settings and history',
+          onPressed: () => context.push(AppRoutes.settings),
+          icon: const Icon(Icons.settings))],
+      ),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 500),
+          child: ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              FeatureButton(action: () => context.push(AppRoutes.textTranslation),
+                icon: Icons.translate, text: 'Text translation',
+                accentColor: TranslifyColors.cameraTranslationAccentColor,
+                backgroundColor: TranslifyColors.nonAdminButtonColor),
+              const SizedBox(height: 16),
+              FeatureButton(action: () => _camera(context),
+                icon: Icons.photo_camera_outlined, text: 'Camera translation',
+                accentColor: TranslifyColors.cameraTranslationAccentColor,
+                backgroundColor: TranslifyColors.nonAdminButtonColor),
+              const SizedBox(height: 16),
+              FeatureButton(action: () => context.push(AppRoutes.conversation),
+                icon: Icons.mic_none_rounded, text: 'Conversation translation',
+                accentColor: TranslifyColors.convesationTranslationAccentColor,
+                backgroundColor: TranslifyColors.nonAdminButtonColor),
+            ],
           ),
-
-          // Button to take you to camera translation feature
-          Align(
-            alignment: AlignmentGeometry.center,
-            child: FeatureButton(
-              action: () => {cameraTranslationButtonTapped(context)},
-              icon: Icons.photo_camera_outlined,
-              text: "Camera Translation",
-              accentColor: TranslifyColors.cameraTranslationAccentColor,
-              backgroundColor: TranslifyColors.nonAdminButtonColor,
-            ),
-          ),
-
-          SizedBox(height: MediaQuery.of(context).size.height * .05),
-
-          // Button to take you to camera translation feature
-          Align(
-            alignment: AlignmentGeometry.center,
-            child: FeatureButton(
-              action: () => {conversationTranslationButtonTapped(context)},
-              icon: Icons.mic_none_rounded,
-              text: "Conversation Translation",
-              accentColor: TranslifyColors.convesationTranslationAccentColor,
-              backgroundColor: TranslifyColors.nonAdminButtonColor,
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }

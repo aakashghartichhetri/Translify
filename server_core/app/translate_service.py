@@ -1,61 +1,28 @@
 import httpx
-
 from app.config import TRANSLATE_SERVICE, SUPPORTED_LANGUAGES
+from app.upstream import checked_post, UpstreamError
 
 
 class TranslationService:
-    def __init__(self):
-        self.base_url = TRANSLATE_SERVICE.rstrip("/")
+    def __init__(self, client: httpx.AsyncClient | None = None):
+        self.client = client
 
-    def validate_language(self, lang: str):
-        if lang not in SUPPORTED_LANGUAGES:
-            raise ValueError(f"Unsupported language: {lang}")
-
-    async def translate_text(
-        self,
-        text: str,
-        source_language: str,
-        target_language: str,
-    ) -> str:
+    async def translate_text(self, text: str, source_language: str, target_language: str) -> str:
         text = text.strip()
-
-        if not text:
-            raise ValueError("Text cannot be empty.")
-
-        self.validate_language(source_language)
-        self.validate_language(target_language)
-
+        if not text or len(text) > 5000:
+            raise ValueError("Text must contain between 1 and 5000 characters.")
+        if source_language not in SUPPORTED_LANGUAGES or target_language not in SUPPORTED_LANGUAGES:
+            raise ValueError("Unsupported language.")
         if source_language == target_language:
             return text
-
-        payload = {
-            "text": text,
-            "sourceLanguage": source_language,
-            "targetLanguage": target_language,
-        }
-
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            response = await client.post(
-                f"{self.base_url}/translate",
-                json=payload,
-            )
-
-        if response.status_code != 200:
-            raise Exception(
-                f"Translation engine error {response.status_code}: {response.text}"
-            )
-
-        data = response.json()
-
-        translated_text = (
-            data.get("translatedText")
-            or data.get("translated_text")
-            or data.get("translation")
-            or data.get("result")
-            or data.get("text")
+        if self.client is None:
+            async with httpx.AsyncClient() as client:
+                return await TranslationService(client).translate_text(text, source_language, target_language)
+        data = await checked_post(
+            self.client, "Translation service", f"{TRANSLATE_SERVICE}/translate", timeout=30.0,
+            json={"text": text, "sourceLanguage": source_language, "targetLanguage": target_language},
         )
-
-        if not translated_text:
-            raise Exception(f"Unexpected translation response: {data}")
-
-        return translated_text
+        result = data.get("translatedText")
+        if not isinstance(result, str) or not result.strip() or len(result) > 10000:
+            raise UpstreamError("Translation service", 502)
+        return result.strip()

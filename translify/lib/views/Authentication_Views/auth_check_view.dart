@@ -1,41 +1,36 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:translify/colors/colors.dart';
+import 'package:translify/services/api_failure.dart';
 import 'package:translify/services/get_user_status.dart';
 import 'package:translify/router/routes.dart';
-import 'package:go_router/go_router.dart';
-import 'package:translify/services/set_translation_history.dart';
 
 class AuthCheckView extends StatefulWidget {
   const AuthCheckView({super.key});
-
   @override
   State<AuthCheckView> createState() => _AuthCheckViewState();
 }
 
 class _AuthCheckViewState extends State<AuthCheckView> {
-  // Function to check the user's authentication status, and to direct them to the correct views
-  Future<void> checkAuthStatus() async {
-    // Get an instance of go router to use
-    // Have to do this because this function is called in init state, before any context is actually formed
-    final router = GoRouter.of(context);
+  String? _error;
 
-    bool authGood = await getUserStatus();
-
-    if (!mounted) return;
-
-    // Go to view based on status
-    if (authGood) {
-      router.go(AppRoutes.home);
-    } else {
-      await setTranslationHistory("False");
-      router.go(AppRoutes.login);
+  Future<void> _check() async {
+    setState(() => _error = null);
+    try {
+      final signedIn = await getUserStatus();
+      if (!mounted) return;
+      context.go(signedIn ? AppRoutes.home : AppRoutes.login);
+    } catch (error) {
+      if (mounted) setState(() => _error = readableFailure(error));
     }
   }
 
   @override
   void initState() {
     super.initState();
-    checkAuthStatus();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _check();
+    });
   }
 
   @override
@@ -43,9 +38,17 @@ class _AuthCheckViewState extends State<AuthCheckView> {
     return Scaffold(
       backgroundColor: TranslifyColors.backgroundColor,
       body: Center(
-        child: CircularProgressIndicator(
-          color: TranslifyColors.adminButtonColor,
-        ),
+        child: _error == null
+            ? const CircularProgressIndicator()
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(_error!, textAlign: TextAlign.center,
+                    style: TextStyle(color: TranslifyColors.headerTextColor)),
+                  const SizedBox(height: 12),
+                  ElevatedButton(onPressed: _check, child: const Text('Retry')),
+                ],
+              ),
       ),
     );
   }

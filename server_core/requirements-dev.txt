@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8,<10
+opencv-python-headless>=4.10,<5
+numpy>=1.26,<3

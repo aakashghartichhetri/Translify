@@ -1,28 +1,44 @@
+"""Fail-closed runtime configuration. Environment files are never loaded implicitly."""
 import os
-from dotenv import load_dotenv
 from sqlalchemy.engine import URL
 
-#load_dotenv()
 
-DATABASE_USER = os.getenv("DATABASE_USER")
-DATABASE_PASSWORD = os.getenv("DATABASE_PASSWORD")
-DATABASE_NAME = os.getenv("DATABASE_NAME")
-DATABASE_SOCKET = os.getenv("DATABASE_SOCKET")
+def positive_int(name: str, default: int, maximum: int) -> int:
+    value = int(os.getenv(name, str(default)))
+    if not 1 <= value <= maximum:
+        raise ValueError(f"{name} must be between 1 and {maximum}")
+    return value
 
-DATABASE_URL = URL.create(
-    drivername = "postgresql",
-    username = DATABASE_USER,
-    password = DATABASE_PASSWORD,
-    database = DATABASE_NAME,
-    host = DATABASE_SOCKET,
-)
 
-TRANSLATE_SERVICE = os.getenv("TRANSLATE_SERVICE")
-IMAGE_TO_TEXT_SERVICE = os.getenv("IMAGE_TO_TEXT_SERVICE")
-SPEECH_TO_TEXT_SERVICE = os.getenv("SPEECH_TO_TEXT_SERVICE")
+SECRET_KEY = os.environ.get("SECRET_KEY", "")
+if len(SECRET_KEY.encode("utf-8")) < 32:
+    raise RuntimeError("SECRET_KEY must be set to a random secret of at least 32 bytes")
 
-SUPPORTED_LANGUAGES = os.getenv("SUPPORTED_LANGUAGES", "en,es,fr").split(",")
+# Do not accept an algorithm chosen from deployment configuration.
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = positive_int("ACCESS_TOKEN_EXPIRE_MINUTES", 30, 1440)
+SUPPORTED_LANGUAGES = tuple(lang.strip() for lang in os.getenv("SUPPORTED_LANGUAGES", "en,es,fr").split(",") if lang.strip())
+ALLOWED_ORIGINS = [s.strip() for s in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if s.strip()]
+if "*" in ALLOWED_ORIGINS:
+    raise RuntimeError("CORS_ALLOWED_ORIGINS must list explicit trusted origins")
 
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = os.getenv("ALGORITHM")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
+if os.getenv("DATABASE_URL"):
+    DATABASE_URL = os.environ["DATABASE_URL"]
+else:
+    required = ("DATABASE_USER", "DATABASE_PASSWORD", "DATABASE_NAME", "DATABASE_SOCKET")
+    absent = [name for name in required if not os.getenv(name)]
+    if absent:
+        raise RuntimeError("Database environment variables are missing: " + ", ".join(absent))
+    DATABASE_URL = URL.create(
+        drivername="postgresql+psycopg2",
+        username=os.environ["DATABASE_USER"],
+        password=os.environ["DATABASE_PASSWORD"],
+        database=os.environ["DATABASE_NAME"],
+        host=os.environ["DATABASE_SOCKET"],
+    )
+
+TRANSLATE_SERVICE = os.getenv("TRANSLATE_SERVICE", "http://127.0.0.1:8003").rstrip("/")
+IMAGE_TO_TEXT_SERVICE = os.getenv("IMAGE_TO_TEXT_SERVICE", "http://127.0.0.1:8001").rstrip("/")
+SPEECH_TO_TEXT_SERVICE = os.getenv("SPEECH_TO_TEXT_SERVICE", "http://127.0.0.1:8002").rstrip("/")
+MAX_IMAGE_BYTES = positive_int("MAX_IMAGE_BYTES", 5 * 1024 * 1024, 20 * 1024 * 1024)
+MAX_AUDIO_BYTES = positive_int("MAX_AUDIO_BYTES", 15 * 1024 * 1024, 50 * 1024 * 1024)

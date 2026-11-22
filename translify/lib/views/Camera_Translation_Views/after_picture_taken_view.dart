@@ -1,216 +1,139 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:translify/languages/languages.dart';
 import 'package:translify/colors/colors.dart';
-import 'package:translify/widgets/button.dart';
 import 'package:translify/widgets/language_selector.dart';
 import 'package:translify/router/routes.dart';
-import 'dart:io';
+import 'package:translify/services/api_failure.dart';
 import 'package:translify/services/image_translate_service.dart';
-import "package:translify/models/image_translation_response_model.dart";
 
 class AfterPictureTakenView extends StatefulWidget {
-  final String imagePath;
-  final String initialSourceLanguage;
-  final String initialTargetLanguage;
-
   const AfterPictureTakenView({
     super.key,
     required this.imagePath,
     required this.initialSourceLanguage,
     required this.initialTargetLanguage,
   });
+  final String imagePath;
+  final String initialSourceLanguage;
+  final String initialTargetLanguage;
 
   @override
   State<AfterPictureTakenView> createState() => _AfterPictureTakenViewState();
 }
 
 class _AfterPictureTakenViewState extends State<AfterPictureTakenView> {
-  // Set variables to change here
-
-  // Target Language Variables
-  late String targetLanguage;
-  late String targetLanguageButtonMessage;
-  void updateTargetLanguage(Languages language) {
-    // If the languages for the first and second speaker match, swap them around
-    // Ex: First person has English, and Second person has Spanish. If the First person picks Spanish in their menu, First person will have Spanish and Second person will have English
-    if (sourceLanguage == language.code) {
-      // Get the language value from the enum
-      Languages targetName = Languages.values.firstWhere(
-        (language) => language.code == targetLanguage,
-      );
-
-      setState(() {
-        sourceLanguage = targetLanguage;
-        sourceLanguageButtonMessage = "Source Language: ${targetName.name}";
-
-        targetLanguage = language.code;
-        targetLanguageButtonMessage = "Target Language: ${language.name}";
-      });
-    }
-    // Else only update the first person
-    else {
-      setState(() {
-        targetLanguage = language.code;
-        targetLanguageButtonMessage = "Target Language: ${language.name}";
-      });
-    }
-  }
-
-  // Source Language Variables
-  late String sourceLanguage;
-  late String sourceLanguageButtonMessage;
-  void updateSourceLanguage(Languages language) {
-    // If the languages for the first and second speaker match, swap them around
-    // Ex: First person has English, and Second person has Spanish. If the First person picks Spanish in their menu, First person will have Spanish and Second person will have English
-    if (targetLanguage == language.code) {
-      Languages sourceName = Languages.values.firstWhere(
-        (language) => language.code == sourceLanguage,
-      );
-
-      setState(() {
-        targetLanguage = sourceLanguage;
-        targetLanguageButtonMessage = "Target Language: ${sourceName.name}";
-
-        sourceLanguage = language.code;
-        sourceLanguageButtonMessage = "Source Language: ${language.name}";
-      });
-    }
-    // Else only update the first person
-    else {
-      setState(() {
-        sourceLanguage = language.code;
-        sourceLanguageButtonMessage = "Source Language: ${language.name}";
-      });
-    }
-  }
-
-  // Waiting var
-  bool translationWaiting = false;
-
-  void translateButtonPressed(BuildContext context) async {
-    setState(() {
-      translationWaiting = true;
-    });
-    List<ImageTranslationResponseModel> response =
-        await imageTranslationService(
-          widget.imagePath,
-          sourceLanguage,
-          targetLanguage,
-        );
-
-    setState(() {
-      translationWaiting = false;
-    });
-
-    // Go to the next page
-    BuildContext contextCheck = context;
-
-    if (!contextCheck.mounted) {
-      return;
-    } else {
-      context.push(
-        AppRoutes.cameraTranslationResult,
-        extra: {"path": widget.imagePath, "results": response},
-      );
-    }
-  }
+  late String _source;
+  late String _target;
+  bool _loading = false;
 
   @override
   void initState() {
     super.initState();
-    // Find the corresponding langauges from the Language Enum
-    Languages targetName = Languages.values.firstWhere(
-      (language) => language.code == widget.initialTargetLanguage,
-    );
+    _source = widget.initialSourceLanguage;
+    _target = widget.initialTargetLanguage;
+  }
 
-    Languages sourceName = Languages.values.firstWhere(
-      (language) => language.code == widget.initialSourceLanguage,
-    );
+  String _languageName(String code) =>
+      Languages.values.firstWhere((language) => language.code == code).name;
 
-    setState(() {
-      targetLanguage = targetName.code;
-      targetLanguageButtonMessage = "Target Language: ${targetName.name}";
-
-      sourceLanguage = sourceName.code;
-      sourceLanguageButtonMessage = "Source Language: ${sourceName.name}";
-    });
+  Future<void> _translate() async {
+    if (_loading) return;
+    setState(() => _loading = true);
+    try {
+      final blocks = await imageTranslationService(
+        widget.imagePath,
+        _source,
+        _target,
+      );
+      if (!mounted) return;
+      context.push(
+        AppRoutes.cameraTranslationResult,
+        extra: {'path': widget.imagePath, 'results': blocks},
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(readableFailure(error))));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return PopScope(
       canPop: false,
-      onPopInvokedWithResult: (bool didPop, Object? result) async {
-        // Push the replacement back to the camera page
-        if (didPop) {
-          return;
-        } else {
-          context.pushReplacement(AppRoutes.initialCamera);
-        }
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) context.pushReplacement(AppRoutes.initialCamera);
       },
       child: Scaffold(
+        appBar: AppBar(title: const Text('Translate your photo')),
         backgroundColor: TranslifyColors.backgroundColor,
-
-        body: Column(
-          children: [
-            // Preview of the image
-            SizedBox(
-              height: MediaQuery.of(context).size.height * .6,
-              width: MediaQuery.of(context).size.width,
-              child: Image.file(File(widget.imagePath)),
-            ),
-
-            SizedBox(height: MediaQuery.of(context).size.height * .05),
-
-            // The button to select the source language
-            LanguageSelector(
-              updateLanguageChoice: (langauge) => {
-                updateSourceLanguage(langauge),
-              },
-              buttonText: sourceLanguageButtonMessage,
-              buttonBackgroundColor:
-                  TranslifyColors.cameraTranslationAccentColor,
-              buttonTextColor: TranslifyColors.darkButtonText,
-              menuItemBackgroundColor: TranslifyColors.nonAdminButtonColor,
-              menuItemTextColor: TranslifyColors.cameraTranslationAccentColor,
-              currentLanguage: sourceLanguage,
-              disabledColor: TranslifyColors.disabledOptionColor,
-            ),
-
-            SizedBox(height: MediaQuery.of(context).size.height * .025),
-
-            // The button to select the target language
-            LanguageSelector(
-              updateLanguageChoice: (langauge) => {
-                updateTargetLanguage(langauge),
-              },
-              buttonText: targetLanguageButtonMessage,
-              buttonBackgroundColor:
-                  TranslifyColors.cameraTranslationAccentColor,
-              buttonTextColor: TranslifyColors.darkButtonText,
-              menuItemBackgroundColor: TranslifyColors.nonAdminButtonColor,
-              menuItemTextColor: TranslifyColors.cameraTranslationAccentColor,
-              currentLanguage: targetLanguage,
-              disabledColor: TranslifyColors.disabledOptionColor,
-            ),
-
-            SizedBox(height: MediaQuery.of(context).size.height * .05),
-
-            !translationWaiting
-                ?
-                  // The button to take a picture
-                  Button(
-                    text: "Translate!",
-                    action: () => translateButtonPressed(context),
-                    backgroundColor:
-                        TranslifyColors.cameraTranslationAccentColor,
-                    textColor: TranslifyColors.darkButtonText,
-                  )
-                : CircularProgressIndicator(
-                    color: TranslifyColors.cameraTranslationAccentColor,
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 650),
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                SizedBox(
+                  height: MediaQuery.of(context).size.height * .45,
+                  child: Image.file(
+                    File(widget.imagePath),
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stack) => const Center(
+                      child: Text(
+                        'Photo could not be displayed. Please take another.',
+                      ),
+                    ),
                   ),
-          ],
+                ),
+                const SizedBox(height: 16),
+                LanguageSelector(
+                  updateLanguageChoice: (language) => setState(() {
+                    if (_target == language.code) _target = _source;
+                    _source = language.code;
+                  }),
+                  buttonText: 'Source language: ${_languageName(_source)}',
+                  buttonBackgroundColor:
+                      TranslifyColors.cameraTranslationAccentColor,
+                  buttonTextColor: TranslifyColors.darkButtonText,
+                  menuItemBackgroundColor: TranslifyColors.nonAdminButtonColor,
+                  menuItemTextColor:
+                      TranslifyColors.cameraTranslationAccentColor,
+                  currentLanguage: _source,
+                  disabledColor: TranslifyColors.disabledOptionColor,
+                ),
+                const SizedBox(height: 12),
+                LanguageSelector(
+                  updateLanguageChoice: (language) => setState(() {
+                    if (_source == language.code) _source = _target;
+                    _target = language.code;
+                  }),
+                  buttonText: 'Target language: ${_languageName(_target)}',
+                  buttonBackgroundColor:
+                      TranslifyColors.cameraTranslationAccentColor,
+                  buttonTextColor: TranslifyColors.darkButtonText,
+                  menuItemBackgroundColor: TranslifyColors.nonAdminButtonColor,
+                  menuItemTextColor:
+                      TranslifyColors.cameraTranslationAccentColor,
+                  currentLanguage: _target,
+                  disabledColor: TranslifyColors.disabledOptionColor,
+                ),
+                const SizedBox(height: 22),
+                if (_loading)
+                  const Center(child: CircularProgressIndicator())
+                else
+                  ElevatedButton(
+                    onPressed: _translate,
+                    child: const Text('Translate photo'),
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     );
