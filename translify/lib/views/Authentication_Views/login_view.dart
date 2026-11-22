@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:translify/widgets/button.dart';
 import 'package:translify/widgets/forms/login_form.dart';
 import 'package:translify/colors/colors.dart';
 import 'package:translify/router/routes.dart';
+import 'package:translify/services/api_failure.dart';
 import 'package:translify/services/login_service.dart';
 
 class LoginView extends StatefulWidget {
@@ -14,100 +14,65 @@ class LoginView extends StatefulWidget {
 }
 
 class _LoginViewState extends State<LoginView> {
-  // Text controllers for Login Form
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+  bool _loading = false;
 
-  // Global Key for Form
-  final _loginFormKey = GlobalKey<FormState>();
-
-  // Dispose of the text controllers when changing views
   @override
   void dispose() {
-    _emailController.dispose();
-    _passwordController.dispose();
+    _email.dispose();
+    _password.dispose();
     super.dispose();
   }
 
-  // Function for when Login button is clicked
-  void loginButtonTapped(BuildContext context) async {
-    // Validate form content first
-    if (!_loginFormKey.currentState!.validate()) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Something went wrong')));
-      return;
-    }
-
-    // Send form content to backend
+  Future<void> _login() async {
+    if (!_formKey.currentState!.validate() || _loading) return;
+    setState(() => _loading = true);
     try {
-      bool? response = await loginService(
-        _emailController.text,
-        _passwordController.text,
-      );
-
-      if (response) {
-        BuildContext contextCheck = context;
-        if (!contextCheck.mounted) return;
-
-        context.go(AppRoutes.afterNewUser);
-      }
+      await loginService(_email.text, _password.text);
+      if (mounted) context.go(AppRoutes.afterNewUser);
     } catch (error) {
-      print(error);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(readableFailure(error))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
-  }
-
-  // Function for when Sign Up button is clicked
-  void signUpButtonTapped(BuildContext context) {
-    context.push(AppRoutes.signUp);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: TranslifyColors.backgroundColor,
-      body: Column(
-        children: [
-          SizedBox(height: MediaQuery.of(context).size.height * .1),
-
-          // Text Logo
-          Text(
-            "Translify",
-            style: TextStyle(
-              color: TranslifyColors.headerTextColor,
-              fontSize: 50,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('Translify', style: TextStyle(
+                    color: TranslifyColors.headerTextColor, fontSize: 46,
+                  )),
+                  const SizedBox(height: 36),
+                  LoginForm(email: _email, password: _password, formKey: _formKey),
+                  const SizedBox(height: 24),
+                  if (_loading) const CircularProgressIndicator()
+                  else ...[
+                    ElevatedButton(onPressed: _login, child: const Text('Log in')),
+                    TextButton(onPressed: () => context.push(AppRoutes.signUp),
+                      child: const Text('Create an account')),
+                  ],
+                ],
+              ),
             ),
           ),
-
-          SizedBox(height: MediaQuery.of(context).size.height * .1),
-
-          // Login Form
-          LoginForm(
-            email: _emailController,
-            password: _passwordController,
-            formKey: _loginFormKey,
-          ),
-
-          SizedBox(height: MediaQuery.of(context).size.height * .05),
-
-          // Button to confirm the signup
-          Button(
-            text: "Log In!",
-            action: () => {loginButtonTapped(context)},
-            backgroundColor: TranslifyColors.adminButtonColor,
-            textColor: TranslifyColors.adminButtonTextColor,
-          ),
-
-          SizedBox(height: MediaQuery.of(context).size.height * .05),
-
-          // Button to Take You to Sign Up Page
-          Button(
-            text: "Sign Up",
-            action: () => {signUpButtonTapped(context)},
-            backgroundColor: TranslifyColors.adminButtonColor,
-            textColor: TranslifyColors.adminButtonTextColor,
-          ),
-        ],
+        ),
       ),
     );
   }

@@ -1,144 +1,141 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:translify/colors/colors.dart';
-import 'package:translify/widgets/button.dart';
-import 'package:translify/services/log_out_service.dart';
-import 'package:translify/services/get_user_history_service.dart';
 import 'package:translify/router/routes.dart';
-import 'package:translify/widgets/history_card.dart';
+import 'package:translify/services/api_failure.dart';
+import 'package:translify/services/delete_history_service.dart';
+import 'package:translify/services/get_user_history_service.dart';
+import 'package:translify/services/log_out_service.dart';
 
 class SettingView extends StatefulWidget {
   const SettingView({super.key});
-
   @override
   State<SettingView> createState() => _SettingViewState();
 }
 
 class _SettingViewState extends State<SettingView> {
-  // Log out function
-  Future<void> logOutButtonPressed(BuildContext context) async {
-    await logOutService();
-
-    BuildContext contextCheck = context;
-
-    if (!contextCheck.mounted) {
-      return;
-    } else {
-      context.go(AppRoutes.login);
-    }
-  }
-
-  // Function to get translation history
-  Future<dynamic> getUserHistory() async {
-    final history = await getUserHistoryService();
-
-    setState(() {
-      userHistory = history;
-      historyLoaded = true;
-    });
-  }
-
-  void translationHistoryButtonPressed(BuildContext context) {
-    context.push(AppRoutes.afterNewUser);
-  }
-
-  // Bool to check if history has loaded yet
-  bool historyLoaded = false;
-
-  // Variable that keeps the history
-  late List<dynamic> userHistory;
+  bool _loading = true;
+  String? _error;
+  List<dynamic> _history = [];
 
   @override
   void initState() {
     super.initState();
-    getUserHistory();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final history = await getUserHistoryService();
+      if (mounted) setState(() => _history = history);
+    } catch (error) {
+      if (mounted) setState(() => _error = readableFailure(error));
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _delete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete translation history?'),
+        content: const Text(
+          'This permanently deletes translations saved to your account.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await deleteHistoryService();
+      if (mounted) await _load();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(readableFailure(error))));
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: TranslifyColors.backgroundColor,
-
-      body: Column(
-        children: [
-          SizedBox(height: MediaQuery.of(context).size.height * .1),
-
-          // Header for history
-          Text(
-            "Your Translation History:",
-            style: TextStyle(
-              color: TranslifyColors.headerTextColor,
-              fontSize: 25,
-            ),
+      appBar: AppBar(title: const Text('Settings and history')),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 700),
+          child: Column(
+            children: [
+              Wrap(
+                spacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  TextButton.icon(
+                    onPressed: () => context.push(AppRoutes.afterNewUser),
+                    icon: const Icon(Icons.privacy_tip),
+                    label: const Text('History preference'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _history.isEmpty ? null : _delete,
+                    icon: const Icon(Icons.delete_outline),
+                    label: const Text('Delete saved history'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _load,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Refresh'),
+                  ),
+                  TextButton.icon(
+                    onPressed: () async {
+                      await logOutService();
+                      if (context.mounted) context.go(AppRoutes.login);
+                    },
+                    icon: const Icon(Icons.logout),
+                    label: const Text('Log out'),
+                  ),
+                ],
+              ),
+              if (_loading)
+                const Expanded(
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (_error != null)
+                Expanded(child: Center(child: Text(_error!)))
+              else if (_history.isEmpty)
+                const Expanded(
+                  child: Center(child: Text('No translations saved yet.')),
+                )
+              else
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: _history.length,
+                    itemBuilder: (context, index) {
+                      final item = _history[index] as Map<String, dynamic>;
+                      return ListTile(
+                        title: Text(item['translated_text'] as String? ?? ''),
+                        subtitle: Text(item['original_text'] as String? ?? ''),
+                        isThreeLine: true,
+                      );
+                    },
+                  ),
+                ),
+            ],
           ),
-
-          // The translation history items
-          historyLoaded
-              ? userHistory.isEmpty
-                    ? Text(
-                        "No History Saved",
-                        style: TextStyle(
-                          color: TranslifyColors.headerTextColor,
-                          fontSize: 25,
-                        ),
-                      )
-                    :
-                      // Build the tiles of translation history
-                      Expanded(
-                        child: ListView.builder(
-                          itemCount: userHistory.length,
-                          itemBuilder: (BuildContext context, int index) {
-                            final item = userHistory[index];
-                            return HistoryCard(
-                              originalText: item["original_text"],
-                              translatedText: item["translated_text"],
-                              sourceLanguage: item["source_language"],
-                              targetLangauge: item["target_language"],
-                              mode: item["mode"] == "image"
-                                  ? "Camera Translation"
-                                  : "Conversation Translation",
-                              backgroundColor:
-                                  TranslifyColors.nonAdminButtonColor,
-                              modeColor: item["mode"] == "image"
-                                  ? TranslifyColors.cameraTranslationAccentColor
-                                  : TranslifyColors
-                                        .convesationTranslationAccentColor,
-                              textTextColor: TranslifyColors.headerTextColor,
-                              modeTextColor: TranslifyColors.darkButtonText,
-                              adminButtonColor:
-                                  TranslifyColors.adminButtonColor,
-                            );
-                          },
-                        ),
-                      )
-              : CircularProgressIndicator(
-                  color: TranslifyColors.adminButtonColor,
-                ),
-
-          // A button to log out
-          Center(
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Button(
-                  text: "Log Out",
-                  action: () => logOutButtonPressed(context),
-                  backgroundColor: TranslifyColors.adminButtonColor,
-                  textColor: TranslifyColors.adminButtonTextColor,
-                ),
-
-                SizedBox(width: 20),
-
-                Button(
-                  text: "Save Translation History",
-                  action: () => translationHistoryButtonPressed(context),
-                  backgroundColor: TranslifyColors.adminButtonColor,
-                  textColor: TranslifyColors.adminButtonTextColor,
-                ),
-              ],
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }

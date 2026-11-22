@@ -1,0 +1,97 @@
+name: Verify backend and Flutter
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: server_core/requirements-dev.txt
+      - name: Install backend and test dependencies
+        run: python -m pip install -r server_core/requirements-dev.txt
+      - name: Verify dependencies and syntax
+        run: |
+          python -m pip check
+          python -m compileall -q server_core imageProcessing speechProcessing translationEngine
+      - name: Backend API and processing contract tests
+        env:
+          PYTHONPATH: server_core
+        run: python -m pytest -q server_core/tests
+      - name: Demo fixture service contract tests (no real AI)
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q demo_ai/tests
+      - name: HTTP health and auth smoke test
+        working-directory: server_core
+        env:
+          DATABASE_URL: sqlite+pysqlite:///./ci-smoke.db
+          SECRET_KEY: ci-only-test-key-0123456789abcdefghijklmnopqrstuvwxyz
+        run: |
+          python -m app.init_db
+          uvicorn app.main:app --host 127.0.0.1 --port 8099 > /tmp/translify-smoke.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for i in {1..25}; do
+            if curl --fail --silent http://127.0.0.1:8099/health | grep -q 'ok'; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8099/health | grep -q 'ok'
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8099/history)" = "401"
+
+  flutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.44.8'
+          cache: true
+      - name: Install Flutter packages
+        working-directory: translify
+        run: flutter pub get
+      - name: Static analysis
+        working-directory: translify
+        run: flutter analyze
+      - name: Widget and service tests
+        working-directory: translify
+        run: flutter test
+      - name: Android debug build
+        working-directory: translify
+        run: flutter build apk --debug --no-pub
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check for accidentally tracked dotenv files
+        run: |
+          if git ls-files | grep -E '(^|/)\.env(\..*)?$' | grep -vE '\.env\.example$'; then
+            echo 'A dotenv file is tracked. Remove it from the Git index.'
+            exit 1
+          fi
+      - name: Audit backend requirements
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit -r server_core/requirements.txt

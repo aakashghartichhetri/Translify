@@ -1,0 +1,5 @@
+# Translation performance and quality validation plan
+
+**Do not report fake latency:** FastAPI tests use HTTPX mock transports. Those tests establish API behavior, not inference speed. Capture real latency only on a documented host, model version/checksum, memory/CPU/GPU allocation, warmed model state, and dataset; record median and 95th-percentile end-to-end times separately for text, image, and speech. Report input sizes, samples per mode, failures, cold starts, and concurrency. Avoid uploading users' actual private texts into public benchmark reports.
+
+For translation quality, use a dataset whose language pairs, domains, rights, and reference translations match the product. Consider FLORES-200 for NLLB language pairs with appropriate permissions and reference metrics such as chrF/COMET; compare against a simple baseline and include examples reviewed by bilingual humans. Do not infer output quality from tests with mock translations. For OCR/speech, keep WER/CER and transcription accuracy separate from downstream translation metrics. A simulated integration test cannot support claims of independently validated quality or real-time speed.

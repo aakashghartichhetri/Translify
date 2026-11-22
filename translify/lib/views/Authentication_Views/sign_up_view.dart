@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:translify/router/routes.dart';
-import 'package:translify/widgets/button.dart';
 import 'package:translify/widgets/forms/sign_up_form.dart';
 import 'package:translify/colors/colors.dart';
+import 'package:translify/services/api_failure.dart';
 import 'package:translify/services/sign_up_service.dart';
 
 class SignUpView extends StatefulWidget {
@@ -14,49 +13,38 @@ class SignUpView extends StatefulWidget {
 }
 
 class _SignUpViewState extends State<SignUpView> {
-  // Text controllers for Sign Up Form
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-  final _confirmPasswordController = TextEditingController();
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  final _confirmPassword = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+  bool _loading = false;
 
-  // Global Key for Form
-  final _signUpFormKey = GlobalKey<FormState>();
-
-  // Dispose of the text controllers when changing views
   @override
   void dispose() {
-    _emailController.dispose();
-    _passwordController.dispose();
-    _confirmPasswordController.dispose();
+    _email.dispose();
+    _password.dispose();
+    _confirmPassword.dispose();
     super.dispose();
   }
 
-  // For when the Sign Up Button is clicked
-  void signUpButtonTapped(BuildContext context) async {
-    // Validate form content first
-    if (!_signUpFormKey.currentState!.validate()) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Something went wrong')));
-      return;
-    }
-
-    // Send form content to backend
+  Future<void> _signUp() async {
+    if (!_formKey.currentState!.validate() || _loading) return;
+    setState(() => _loading = true);
     try {
-      String? response = await signUpService(
-        _emailController.text,
-        _passwordController.text,
+      await signUpService(_email.text, _password.text);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Account created. You can now log in.')),
       );
-
-      if (response == "Good") {
-        BuildContext contextCheck = context;
-        if (!contextCheck.mounted) return;
-
-        // Send the user back to the login page
-        context.pop;
-      }
+      context.pop(); // Calling pop matters: the old code only referenced the function.
     } catch (error) {
-      print(error);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(readableFailure(error))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -64,36 +52,29 @@ class _SignUpViewState extends State<SignUpView> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: TranslifyColors.backgroundColor,
-      body: Column(
-        children: [
-          SizedBox(height: MediaQuery.of(context).size.height * .1),
-
-          // Text Logo
-          Text(
-            "Translify",
-            style: TextStyle(color: Colors.white, fontSize: 50),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('Create account', style: TextStyle(
+                    color: TranslifyColors.headerTextColor, fontSize: 34,
+                  )),
+                  const SizedBox(height: 32),
+                  SignUpForm(email: _email, password: _password,
+                    confirmPassword: _confirmPassword, formKey: _formKey),
+                  const SizedBox(height: 24),
+                  if (_loading) const CircularProgressIndicator()
+                  else ElevatedButton(onPressed: _signUp, child: const Text('Sign up')),
+                ],
+              ),
+            ),
           ),
-
-          SizedBox(height: MediaQuery.of(context).size.height * .1),
-
-          // Sign Up Form
-          SignUpForm(
-            email: _emailController,
-            password: _passwordController,
-            confirmPassword: _confirmPasswordController,
-            formKey: _signUpFormKey,
-          ),
-
-          SizedBox(height: MediaQuery.of(context).size.height * .05),
-
-          // Button to confirm the signup
-          Button(
-            text: "Sign Up!",
-            action: () => {signUpButtonTapped(context)},
-            backgroundColor: TranslifyColors.adminButtonColor,
-            textColor: TranslifyColors.adminButtonTextColor,
-          ),
-        ],
+        ),
       ),
     );
   }
